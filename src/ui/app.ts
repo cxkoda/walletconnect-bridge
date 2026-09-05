@@ -1,4 +1,4 @@
-import { renderCard, renderDappHeader } from './render';
+import { escapeHtml, renderCard, renderDappHeader } from './render';
 import type { PendingConfirmations } from './pending';
 import type { DappIdentity } from '../bridge/types';
 
@@ -27,6 +27,7 @@ export class AppUI {
           <span id="wallet-status" class="muted">Not connected</span>
         </div>
         <div id="wallet-note"></div>
+        <div id="wallet-warning"></div>
       </section>
       <section id="pair">
         <div class="row">
@@ -63,9 +64,16 @@ export class AppUI {
     }
   }
 
-  /** Persistent wallet-level notice (stale account, disconnected wallet). */
+  /**
+   * Transient wallet-level notice (stale account, disconnected wallet).
+   *
+   * Kept in its own node, separate from the persistent smart-account banner
+   * `setWallet` writes to `#wallet-note` — this fires repeatedly (e.g. on
+   * every `accountsChanged`, even a benign reconnect) and must not clobber
+   * that standing warning when it clears itself back to `''`.
+   */
   setWalletWarning(text: string): void {
-    (this.root.querySelector('#wallet-note') as HTMLElement).innerHTML = text
+    (this.root.querySelector('#wallet-warning') as HTMLElement).innerHTML = text
       ? `<div class="banner warn">${text}</div>`
       : '';
   }
@@ -86,7 +94,7 @@ export class AppUI {
       .map(
         (r) =>
           `<div class="row" style="margin-bottom:8px">${renderDappHeader(r.dapp)}
-           <button class="secondary" data-topic="${r.topic}">Disconnect</button></div>`,
+           <button class="secondary" data-topic="${escapeHtml(r.topic)}">Disconnect</button></div>`,
       )
       .join('');
     el.querySelectorAll<HTMLButtonElement>('button[data-topic]').forEach((b) =>

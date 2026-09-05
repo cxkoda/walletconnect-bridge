@@ -41,8 +41,18 @@ const ui = new AppUI({
     }
   },
   onDisconnect: async (topic) => {
-    await kit?.disconnectSession({ topic, reason: getSdkError('USER_DISCONNECTED') });
-    refreshSessions();
+    try {
+      await kit?.disconnectSession({ topic, reason: getSdkError('USER_DISCONNECTED') });
+    } catch (err) {
+      ui.setWalletWarning(
+        err instanceof Error ? err.message : 'Failed to disconnect that session.',
+      );
+    } finally {
+      // Refresh even on failure: if the relay call failed because the
+      // session was already gone, the list is stale and must be corrected
+      // either way.
+      refreshSessions();
+    }
   },
 });
 
@@ -64,28 +74,62 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
   const dapp = createDappPort(instance);
 
   instance.on('session_proposal', async (proposal) => {
-    const decision = decideProposal(proposal.params, w.address);
-    if (!decision.ok) {
-      await instance.rejectSession({ id: proposal.id, reason: { code: 5000, message: decision.reason } });
-      ui.setPairStatus(decision.reason, true);
-      return;
+    try {
+      const decision = decideProposal(proposal.params, w.address);
+      if (!decision.ok) {
+        await instance.rejectSession({
+          id: proposal.id,
+          reason: { code: 5000, message: decision.reason },
+        });
+        ui.setPairStatus(decision.reason, true);
+        return;
+      }
+      await instance.approveSession({ id: proposal.id, namespaces: decision.namespaces });
+      ui.setPairStatus('Connected.');
+      refreshSessions();
+    } catch (err) {
+      // A relay hiccup here must not leave the UI stuck on "Pairing…" with
+      // no way out short of a reload.
+      ui.setPairStatus(
+        err instanceof Error ? err.message : 'Failed to complete the connection.',
+        true,
+      );
     }
-    await instance.approveSession({ id: proposal.id, namespaces: decision.namespaces });
-    ui.setPairStatus('Connected.');
-    refreshSessions();
   });
 
   instance.on('session_request', async (event) => {
     const session = instance.getActiveSessions()[event.topic];
-    const req = toIncomingRequest(event, session.peer.metadata);
-    ui.renderPending(pending);
-    await handleRequest(req, {
-      wallet: w.port,
-      dapp,
-      confirm: pending,
-      isSmartAccount: () => w.isSmartAccount,
-    });
-    ui.renderPending(pending);
+    if (!session) {
+      // The session was deleted (e.g. the dapp disconnected) in a race with
+      // this in-flight request. Responding against a dead topic would throw
+      // too, and the dapp already knows the session is gone, so there is
+      // nothing safe left to send back — just don't crash the handler.
+      console.error(`session_request for an unknown/deleted topic: ${event.topic}`);
+      return;
+    }
+    try {
+      const req = toIncomingRequest(event, session.peer.metadata);
+      ui.renderPending(pending);
+      await handleRequest(req, {
+        wallet: w.port,
+        dapp,
+        confirm: pending,
+        isSmartAccount: () => w.isSmartAccount,
+      });
+    } catch (err) {
+      // handleRequest guarantees a response via its own finally block, so
+      // this only catches failures before that point (e.g. toIncomingRequest
+      // throwing on a malformed chainId) — without this, such a failure
+      // would leave the dapp with no response at all.
+      await dapp
+        .respondError(event.topic, event.id, {
+          code: 5000,
+          message: err instanceof Error ? err.message : 'Bridge failed to produce a response.',
+        })
+        .catch(() => {});
+    } finally {
+      ui.renderPending(pending);
+    }
   });
 
   instance.on('session_request_expire', ({ id }) => {
@@ -110,11 +154,16 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
         stale = true;
         continue;
       }
-      void kit.emitSessionEvent({
-        topic: session.topic,
-        event: { name: 'accountsChanged', data: [next] },
-        chainId: approved[0].split(':').slice(0, 2).join(':'),
-      });
+      void kit
+        .emitSessionEvent({
+          topic: session.topic,
+          event: { name: 'accountsChanged', data: [next] },
+          chainId: approved[0].split(':').slice(0, 2).join(':'),
+        })
+        .catch(() => {
+          // Best-effort fan-out; a relay failure here shouldn't surface as
+          // an unhandled rejection.
+        });
     }
     ui.setWalletWarning(
       stale
@@ -133,11 +182,16 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
     if (!kit) return;
     const chainId = toCaipChainId(Number(hexChainId));
     for (const session of Object.values(kit.getActiveSessions())) {
-      void kit.emitSessionEvent({
-        topic: session.topic,
-        event: { name: 'chainChanged', data: Number(hexChainId) },
-        chainId,
-      });
+      void kit
+        .emitSessionEvent({
+          topic: session.topic,
+          event: { name: 'chainChanged', data: Number(hexChainId) },
+          chainId,
+        })
+        .catch(() => {
+          // Best-effort fan-out; a relay failure here shouldn't surface as
+          // an unhandled rejection.
+        });
     }
   });
 
