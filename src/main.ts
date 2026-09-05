@@ -13,10 +13,21 @@ import { decideProposal } from './bridge/namespaces';
 import { handleRequest } from './bridge/router';
 import { toCaipChainId } from './chains';
 import { getSdkError } from '@walletconnect/utils';
+import type { Verify } from '@walletconnect/types';
 
 const pending = new PendingConfirmations();
 let wallet: WalletConnection | null = null;
 let kit: WalletKitInstance | null = null;
+
+/**
+ * Verify contexts, by session topic, captured at proposal time.
+ *
+ * `getActiveSessions()` does not carry one, so session rows used to be built
+ * with `undefined` and every row rendered a permanent amber "Unverified
+ * origin". Rows with no cached context render no badge at all rather than an
+ * amber claim the bridge cannot support — see `SessionRow.verified`.
+ */
+const verifyContexts = new Map<string, Verify.Context>();
 
 const ui = new AppUI({
   onConnect: async () => {
@@ -56,12 +67,28 @@ const ui = new AppUI({
   },
 });
 
+// The queue is the single source of truth for what the modal shows, and it
+// notifies on every change. Rendering around the `handleRequest` call instead
+// cannot work: the pending slot does not exist until `confirm.confirm()` is
+// reached *inside* handleRequest, and handleRequest cannot settle until the
+// user clicks a button that only the rendered modal carries.
+pending.onChange = () => ui.renderPending(pending);
+
 function refreshSessions(): void {
   if (!kit) return;
-  const rows: SessionRow[] = Object.values(kit.getActiveSessions()).map((s) => ({
-    topic: s.topic,
-    dapp: toDappIdentity(s.peer.metadata, undefined),
-  }));
+  const sessions = Object.values(kit.getActiveSessions());
+  const live = new Set(sessions.map((s) => s.topic));
+  for (const topic of verifyContexts.keys()) {
+    if (!live.has(topic)) verifyContexts.delete(topic);
+  }
+  const rows: SessionRow[] = sessions.map((s) => {
+    const verifyContext = verifyContexts.get(s.topic);
+    return {
+      topic: s.topic,
+      dapp: toDappIdentity(s.peer.metadata, verifyContext),
+      verified: verifyContext !== undefined,
+    };
+  });
   ui.setSessions(rows);
 }
 
@@ -84,7 +111,13 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
         ui.setPairStatus(decision.reason, true);
         return;
       }
-      await instance.approveSession({ id: proposal.id, namespaces: decision.namespaces });
+      const session = await instance.approveSession({
+        id: proposal.id,
+        namespaces: decision.namespaces,
+      });
+      // Cached now because this is the only moment the verify context and the
+      // session topic are both in hand: getActiveSessions() never returns one.
+      if (proposal.verifyContext) verifyContexts.set(session.topic, proposal.verifyContext);
       ui.setPairStatus('Connected.');
       refreshSessions();
     } catch (err) {
@@ -109,7 +142,6 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
     }
     try {
       const req = toIncomingRequest(event, session.peer.metadata);
-      ui.renderPending(pending);
       await handleRequest(req, {
         wallet: w.port,
         dapp,
@@ -127,17 +159,21 @@ async function start(w: WalletConnection): Promise<WalletKitInstance> {
           message: err instanceof Error ? err.message : 'Bridge failed to produce a response.',
         })
         .catch(() => {});
-    } finally {
-      ui.renderPending(pending);
     }
   });
 
   instance.on('session_request_expire', ({ id }) => {
     pending.expire(id);
-    ui.renderPending(pending);
   });
 
   instance.on('session_delete', refreshSessions);
+
+  // Spec lines 250-251: WalletKit reconnects on its own, but a dead relay must
+  // be visible. Without this, a dropped socket looks exactly like a broken
+  // bridge — sessions still listed, sign clicked in the dapp, nothing happens.
+  ui.setRelayStatus(instance.core.relayer.connected ? 'connected' : 'connecting');
+  instance.core.relayer.on('relayer_connect', () => ui.setRelayStatus('connected'));
+  instance.core.relayer.on('relayer_disconnect', () => ui.setRelayStatus('disconnected'));
 
   // Fan wallet state changes out to every live session. Without this, dapps
   // keep displaying a stale address indefinitely.

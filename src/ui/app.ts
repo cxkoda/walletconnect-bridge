@@ -11,7 +11,16 @@ export interface AppCallbacks {
 export interface SessionRow {
   topic: string;
   dapp: DappIdentity;
+  /**
+   * True when a WalletKit Verify context was actually seen for this peer. A
+   * restored session (page reload) has none, and rendering the amber
+   * "Unverified origin" badge for it would be a claim the bridge cannot make.
+   */
+  verified: boolean;
 }
+
+/** Relay socket state, surfaced so a dead relay is visible rather than silent. */
+export type RelayState = 'connecting' | 'connected' | 'disconnected';
 
 export class AppUI {
   private root: HTMLElement;
@@ -36,7 +45,10 @@ export class AppUI {
         </div>
         <p class="muted" id="pair-status">Connect your wallet first.</p>
       </section>
-      <section id="sessions"><p class="muted">No active sessions.</p></section>
+      <section id="sessions">
+        <div id="relay-status"></div>
+        <div id="session-list"><p class="muted">No active sessions.</p></div>
+      </section>
       <dialog id="approval"></dialog>`;
 
     this.dialog = this.root.querySelector('#approval') as HTMLDialogElement;
@@ -84,8 +96,32 @@ export class AppUI {
     el.className = isError ? 'warning danger' : 'muted';
   }
 
+  /**
+   * Relay connection state.
+   *
+   * Its own DOM node on purpose. When the socket dies (wifi drop, laptop
+   * sleep) the session list still shows every session as live and clicking
+   * sign in the dapp simply does nothing — indistinguishable from a bridge
+   * bug. Spec lines 250-251 require this to be visible.
+   */
+  setRelayStatus(state: RelayState): void {
+    const el = this.root.querySelector('#relay-status') as HTMLElement;
+    if (state === 'connected') {
+      el.innerHTML = '<p class="muted">Relay connected.</p>';
+      return;
+    }
+    if (state === 'connecting') {
+      el.innerHTML = '<p class="muted">Connecting to the WalletConnect relay…</p>';
+      return;
+    }
+    el.innerHTML =
+      `<div class="warning danger">Disconnected from the WalletConnect relay. Requests from
+       connected dapps will not arrive until it reconnects — reconnection is automatic, but if
+       this persists, check your network and reload.</div>`;
+  }
+
   setSessions(rows: SessionRow[]): void {
-    const el = this.root.querySelector('#sessions') as HTMLElement;
+    const el = this.root.querySelector('#session-list') as HTMLElement;
     if (rows.length === 0) {
       el.innerHTML = '<p class="muted">No active sessions.</p>';
       return;
@@ -93,7 +129,7 @@ export class AppUI {
     el.innerHTML = rows
       .map(
         (r) =>
-          `<div class="row" style="margin-bottom:8px">${renderDappHeader(r.dapp)}
+          `<div class="row" style="margin-bottom:8px">${renderDappHeader(r.dapp, r.verified)}
            <button class="secondary" data-topic="${escapeHtml(r.topic)}">Disconnect</button></div>`,
       )
       .join('');
@@ -109,7 +145,11 @@ export class AppUI {
       if (this.dialog.open) this.dialog.close();
       return;
     }
-    const unknown = entry.card.title.startsWith('Unrecognised');
+    // Driven by the router's own classification, not by sniffing the card
+    // title for an "Unrecognised" prefix: that made the label a hostage to
+    // decoder coverage, so an allowlisted method with no decoder was offered
+    // as "Forward once" alongside a card claiming it wasn't allowlisted.
+    const unknown = entry.card.disposition.kind === 'unknown';
     this.dialog.innerHTML = `
       ${renderDappHeader(entry.req.dapp)}
       ${renderCard(entry.card)}

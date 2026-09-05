@@ -21,7 +21,13 @@ function badge(dapp: DappIdentity): { cls: string; label: string } {
   return { cls: 'ok', label: 'Verified' };
 }
 
-export function renderDappHeader(dapp: DappIdentity): string {
+/**
+ * @param showBadge Whether a Verify badge is meaningful here. Pass false when
+ *   no verify context was ever seen for this peer — a permanently amber
+ *   "Unverified origin" on every restored session row is not information, it
+ *   is training the user to ignore the badge the approval card depends on.
+ */
+export function renderDappHeader(dapp: DappIdentity, showBadge = true): string {
   const b = badge(dapp);
   const icon = dapp.iconUrl
     ? `<img class="dapp-icon" src="${escapeHtml(dapp.iconUrl)}" alt="" />`
@@ -33,7 +39,7 @@ export function renderDappHeader(dapp: DappIdentity): string {
         <div class="dapp-name">${escapeHtml(dapp.name)}</div>
         <div class="dapp-url">${escapeHtml(dapp.url)}</div>
       </div>
-      <span class="badge ${b.cls}">${escapeHtml(b.label)}</span>
+      ${showBadge ? `<span class="badge ${b.cls}">${escapeHtml(b.label)}</span>` : ''}
     </div>`;
 }
 

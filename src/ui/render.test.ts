@@ -43,6 +43,20 @@ describe('renderDappHeader', () => {
     expect(html).toMatch(/warn/);
     expect(html).not.toMatch(/danger/);
   });
+
+  it('omits the badge entirely when asked, keeping the origin', () => {
+    // For session rows with no verify context: a permanently amber badge on
+    // every row desensitises the user to the badge the approval card relies on.
+    const html = renderDappHeader(dapp({ validation: 'UNKNOWN' }), false);
+    expect(html).not.toMatch(/badge/);
+    expect(html).not.toMatch(/Unverified/);
+    expect(html).toContain('https://dapp.example');
+    expect(html).toContain('Test Dapp');
+  });
+
+  it('still shows the badge by default, which is what the approval card needs', () => {
+    expect(renderDappHeader(dapp())).toMatch(/badge/);
+  });
 });
 
 describe('renderCard', () => {
@@ -52,6 +66,7 @@ describe('renderCard', () => {
     fields: [{ label: 'To', value: '0xabc', mono: true }],
     warnings: [{ severity: 'danger', text: 'UNLIMITED allowance' }],
     raw: '[{"to":"0xabc"}]',
+    disposition: { kind: 'confirm' },
   };
 
   it('renders title, fields and warnings', () => {
