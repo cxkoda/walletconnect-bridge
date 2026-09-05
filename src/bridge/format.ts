@@ -53,6 +53,26 @@ export function formatEther(wei: string | bigint): string {
   return frac ? `${whole}.${frac}` : whole.toString();
 }
 
+/**
+ * Serialise request params for the card's collapsed "raw request" view.
+ *
+ * Every decoder ends with this, which makes it a single point of failure for
+ * the user's only view of the request: a bare `JSON.stringify` throws on a
+ * BigInt or a circular structure, and that throw propagates out of `buildCard`
+ * and takes the whole approval card with it. Failing to serialise the raw
+ * dump must never cost the user the decoded fields above it.
+ */
+export function safeJson(value: unknown): string {
+  try {
+    return (
+      JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2) ??
+      String(value)
+    );
+  } catch {
+    return '(the original request could not be displayed)';
+  }
+}
+
 export function shortAddress(a: string): string {
   return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
 }

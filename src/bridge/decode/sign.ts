@@ -1,5 +1,5 @@
-import type { CardField, CardWarning, DecodeContext, RequestCard } from '../types';
-import { hexToUtf8 } from '../format';
+import type { CardField, CardWarning, DecodeContext, DecodedCard } from '../types';
+import { hexToUtf8, safeJson } from '../format';
 
 export interface SiweMessage {
   domain: string;
@@ -38,7 +38,7 @@ export function parseSiwe(text: string): SiweMessage | null {
   };
 }
 
-export function decodePersonalSign(params: unknown, ctx: DecodeContext): RequestCard {
+export function decodePersonalSign(params: unknown, ctx: DecodeContext): DecodedCard {
   const arr = Array.isArray(params) ? params : [];
   // personal_sign is [message, address]. eth_sign reverses them — which is one
   // reason the bridge refuses eth_sign rather than trying to disambiguate.
@@ -85,6 +85,6 @@ export function decodePersonalSign(params: unknown, ctx: DecodeContext): Request
     title: siwe ? 'Sign-in request' : 'Signature request',
     fields,
     warnings,
-    raw: JSON.stringify(params, null, 2),
+    raw: safeJson(params),
   };
 }

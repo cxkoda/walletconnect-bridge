@@ -47,7 +47,24 @@ export interface RequestCard {
   warnings: CardWarning[];
   /** Pretty-printed original params, shown collapsed. */
   raw: string;
+  /**
+   * How policy classified the method, threaded straight through from the
+   * router.
+   *
+   * The UI drives the approve button's label from this ("Forward once" for an
+   * un-allowlisted method, "Approve" otherwise). It used to sniff the card
+   * title for an "Unrecognised" prefix, which silently mislabelled every card
+   * whose decoder was missing — a string coincidence standing in for a fact
+   * the router already knew.
+   */
+  disposition: Disposition;
 }
+
+/**
+ * What a per-method decoder produces. `buildCard` stamps the disposition on;
+ * individual decoders neither know nor need it.
+ */
+export type DecodedCard = Omit<RequestCard, 'disposition'>;
 
 /** Who is asking, per session metadata + WalletKit Verify. */
 export interface DappIdentity {
