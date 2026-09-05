@@ -1,0 +1,24 @@
+{
+  "name": "cb-walletconnect-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@coinbase/wallet-sdk": "4.3.7",
+    "@reown/walletkit": "1.5.6",
+    "@walletconnect/core": "2.24.0",
+    "@walletconnect/jsonrpc-utils": "1.0.8",
+    "@walletconnect/utils": "2.24.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "5.0.0"
+  }
+}
