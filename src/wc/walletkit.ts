@@ -11,7 +11,7 @@ import type { DappIdentity, DappPort, IncomingRequest, JsonRpcErrorPayload } fro
  * `WalletKit` is not usable as a type name from that import path. This
  * alias recovers the instance type without re-declaring the SDK's shape.
  */
-type WalletKitInstance = InstanceType<typeof WalletKit>;
+export type WalletKitInstance = InstanceType<typeof WalletKit>;
 
 export function toDappIdentity(
   metadata: CoreTypes.Metadata,
