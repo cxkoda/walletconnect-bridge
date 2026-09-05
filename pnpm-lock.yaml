@@ -20,6 +20,9 @@ importers:
       '@walletconnect/jsonrpc-utils':
         specifier: 1.0.8
         version: 1.0.8
+      '@walletconnect/types':
+        specifier: 2.24.0
+        version: 2.24.0
       '@walletconnect/utils':
         specifier: 2.24.0
         version: 2.24.0(typescript@7.0.2)
