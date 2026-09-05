@@ -64,6 +64,14 @@ Failures here are usually **silent omissions** rather than crashes — a missing
 - **`expiryTimestamp` is in seconds**, not milliseconds.
 - **The approval modal opens via an observer**: `src/main.ts` sets `pending.onChange`. That single line is what makes the UI appear at all — deleting it silently restores a full deadlock (the queue is populated *inside* `handleRequest`, so rendering around the call renders an empty queue). See `docs/known-issues.md` #2: the wiring test asserts a *copy* of that line, not the line itself.
 
+## Conventions worth knowing
+
+**Break the code to check a test.** Hollow tests recurred throughout this build — tests that pass regardless of the behaviour they name. Three landed in the router alone: a "responds exactly once even when the dapp port is slow" test that never made anything slow, a "forwards params unchanged" test comparing the params object against *itself* (in-place mutation would mutate the expectation in lockstep), and an approval-card payload that no assertion touched. When adding or changing a test around a security warning or one of the invariants above, mutate the implementation, confirm the test fails, then revert. A test that has never failed has not been verified.
+
+**Don't reach for an ABI-decoding library.** The 4-byte selector table and 32-byte word slicing in `decode/tx.ts` are deliberate. The decoded selectors all take static head-encoded arguments, so slicing is exact, and a tool whose value is being auditable keeps its dependency list short.
+
+**Don't add a backend.** No API routes, no server-side code, no secrets. If something seems to need a server, it almost certainly needs to stay in the browser instead — the no-custody property is the point.
+
 ## Smart-account consequences
 
 The target is a Base Account, so `personal_sign` and `eth_signTypedData_v4` return **ERC-1271/6492 contract signatures**, not ecrecover-able EOA signatures. Dapps that verify naively (many SIWE sign-in flows) will reject them. The bridge detects this and warns; it cannot fix it. `eth_signTransaction` is impossible for a smart account and is refused at negotiation time rather than mid-flow.
