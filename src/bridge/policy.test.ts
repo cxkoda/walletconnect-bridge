@@ -70,4 +70,14 @@ describe('classify', () => {
       expect(classify(m).kind).not.toBe('unknown');
     }
   });
+
+  it.each(['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__'])(
+    'does not resolve Object.prototype members through the rejection table: %s',
+    (m) => {
+      // A plain `REJECTED[method]` index lookup resolves inherited
+      // Object.prototype members, returning a truthy function as `message`.
+      // These must classify as unknown, not a malformed reject.
+      expect(classify(m)).toEqual({ kind: 'unknown' });
+    },
+  );
 });

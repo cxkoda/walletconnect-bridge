@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { decodeTypedData } from './typed';
 import type { DecodeContext } from '../types';
+import { MAX_UINT160 } from '../format';
 
 const ctx: DecodeContext = { chainId: 8453, isSmartAccount: false };
 const smart: DecodeContext = { chainId: 8453, isSmartAccount: true };
@@ -75,5 +76,42 @@ describe('decodeTypedData', () => {
 
   it('does not throw on missing params', () => {
     expect(() => decodeTypedData('eth_signTypedData_v4', null, ctx)).not.toThrow();
+  });
+
+  it('flags an unlimited entry inside a real PermitBatch (Permit2 details[])', () => {
+    // Permit2's actual PermitBatch carries `details` as an array — one entry
+    // per token. A single-object extraction (as PermitSingle uses) silently
+    // drops every amount but the first, hiding an unlimited grant.
+    const batch = {
+      domain: { name: 'Permit2', chainId: 8453, verifyingContract: '0x000000000022D473030F116dDEE9F6B43aC78BA3' },
+      primaryType: 'PermitBatch',
+      message: {
+        spender: '0xrouter',
+        details: [
+          { token: '0xtokA', amount: '5', expiration: '1999999999' },
+          { token: '0xtokB', amount: MAX, expiration: '1999999999' },
+        ],
+      },
+      types: {},
+    };
+    const card = decodeTypedData('eth_signTypedData_v4', ['0xabc', JSON.stringify(batch)], ctx);
+    expect(card.fields).toContainEqual({ label: 'Spender', value: '0xrouter', mono: true });
+    expect(card.fields.some((f) => f.label === 'Amount 1' && f.value === '5')).toBe(true);
+    expect(card.fields.some((f) => f.label === 'Amount 2' && f.value === 'UNLIMITED')).toBe(true);
+    expect(card.warnings.some((w) => w.severity === 'danger' && /unlimited/i.test(w.text))).toBe(true);
+  });
+
+  it('recognises Permit2\'s real sentinel, type(uint160).max, as unlimited', () => {
+    const p2 = {
+      domain: { name: 'Permit2', chainId: 8453, verifyingContract: '0x000000000022D473030F116dDEE9F6B43aC78BA3' },
+      primaryType: 'PermitSingle',
+      message: {
+        details: { token: '0xtok', amount: MAX_UINT160.toString(), expiration: '1999999999' },
+        spender: '0xrouter',
+      },
+      types: {},
+    };
+    const card = decodeTypedData('eth_signTypedData_v4', ['0xabc', JSON.stringify(p2)], ctx);
+    expect(card.warnings.some((w) => w.severity === 'danger' && /unlimited/i.test(w.text))).toBe(true);
   });
 });

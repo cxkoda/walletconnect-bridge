@@ -79,4 +79,14 @@ describe('decodePersonalSign', () => {
     expect(() => decodePersonalSign([], eoa)).not.toThrow();
     expect(decodePersonalSign([], eoa).method).toBe('personal_sign');
   });
+
+  it('still yields the "(empty)" raw-hex field and a warning for empty params', () => {
+    // A card with just `.method` set and nothing else would pass the test
+    // above while showing the user nothing about what they're signing — the
+    // approval card is their only view of the request, so a blank card is a
+    // regression even though it doesn't throw.
+    const card = decodePersonalSign([], eoa);
+    expect(card.fields).toContainEqual({ label: 'Message (raw hex)', value: '(empty)', mono: true });
+    expect(card.warnings.some((w) => /utf-8/i.test(w.text))).toBe(true);
+  });
 });

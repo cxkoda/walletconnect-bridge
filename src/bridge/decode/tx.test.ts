@@ -84,4 +84,22 @@ describe('decodeTransaction', () => {
     expect(() => decodeTransaction([], ctx)).not.toThrow();
     expect(() => decodeTransaction([{ to: '0xa', data: '0x09' }], ctx)).not.toThrow();
   });
+
+  it('does not throw on non-hex approve calldata, and shows "Could not decode"', () => {
+    // `data` is attacker-controlled JSON off the wire. A bare BigInt('0x' +
+    // word) throws SyntaxError on non-hex bytes, which would take down the
+    // whole approval card instead of just failing to decode two fields.
+    const card = decodeTransaction(
+      [{ to: '0xtok', data: '0x095ea7b3' + 'z'.repeat(128) }],
+      ctx,
+    );
+    expect(card.fields.some((f) => f.label === 'Spender' && f.value === 'Could not decode')).toBe(true);
+    expect(card.fields.some((f) => f.label === 'Allowance' && f.value === 'Could not decode')).toBe(true);
+  });
+
+  it('does not throw on non-hex setApprovalForAll calldata', () => {
+    expect(() =>
+      decodeTransaction([{ to: '0xnft', data: '0xa22cb465' + 'z'.repeat(128) }], ctx),
+    ).not.toThrow();
+  });
 });

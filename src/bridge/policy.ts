@@ -65,8 +65,14 @@ const confirmSet: ReadonlySet<string> = new Set(CONFIRM_METHODS);
  * router turns into an explicit user decision — it is never forwarded blindly.
  */
 export function classify(method: string): Disposition {
-  const rejection = REJECTED[method];
-  if (rejection) return { kind: 'reject', code: 4200, message: rejection };
+  // Object.hasOwn, not `REJECTED[method]`: a plain index lookup resolves
+  // inherited Object.prototype members ('toString', 'constructor', 'valueOf',
+  // ...), which would return a truthy function as `message` — violating the
+  // `message: string` contract and silently dropping the message when the
+  // payload is serialised to the dapp.
+  if (Object.hasOwn(REJECTED, method)) {
+    return { kind: 'reject', code: 4200, message: REJECTED[method] };
+  }
   if (passSet.has(method)) return { kind: 'pass' };
   if (confirmSet.has(method)) return { kind: 'confirm' };
   return { kind: 'unknown' };
