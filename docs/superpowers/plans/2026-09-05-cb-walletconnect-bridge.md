@@ -118,7 +118,8 @@ that order. After them:
 
 `vite.config.ts`:
 ```ts
-import { defineConfig } from 'vite';
+// Note: `vitest/config`, not `vite` — only vitest's defineConfig accepts `test`.
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: { environment: 'node', include: ['src/**/*.test.ts'] },
@@ -1982,15 +1983,19 @@ function makeDeps(over: Partial<{
   const errors: JsonRpcErrorPayload[] = [];
   const switched: number[] = [];
   const requested: { method: string; params?: unknown }[] = [];
+  // Shared ordering log, so a test can assert switch-then-forward directly.
+  const order: string[] = [];
 
   const deps = {
     wallet: {
       request: vi.fn(async (a: { method: string; params?: unknown }) => {
+        order.push('request');
         requested.push(a);
         return over.request ? over.request(a) : 'ok';
       }),
       getChainId: vi.fn(async () => over.chainId ?? 8453),
       switchChain: vi.fn(async (id: number) => {
+        order.push('switch');
         switched.push(id);
       }),
     },
@@ -2009,7 +2014,7 @@ function makeDeps(over: Partial<{
     timeoutMs: 50,
   } as unknown as RouterDeps;
 
-  return { deps, results, errors, switched, requested };
+  return { deps, results, errors, switched, requested, order };
 }
 
 const totalResponses = (h: ReturnType<typeof makeDeps>) => h.results.length + h.errors.length;
@@ -2085,7 +2090,8 @@ describe('handleRequest', () => {
     const h = makeDeps({ chainId: 1 });
     await handleRequest(req('eth_sendTransaction', [{ to: '0xa' }], 8453), h.deps);
     expect(h.switched).toEqual([8453]);
-    expect(h.deps.wallet.switchChain).toHaveBeenCalledBefore(h.deps.wallet.request as never);
+    // The switch must be recorded before anything is forwarded.
+    expect(h.order).toEqual(['switch', 'request']);
   });
 
   it('does not switch chain when already on the session chain', async () => {
@@ -2937,7 +2943,7 @@ git commit -m "feat: add confirmation registry and escaped HTML rendering"
 - Create: `src/bridge/architecture.test.ts`
 - Create: `docs/manual-e2e-checklist.md`
 - Modify: `src/main.ts` (replace the `export {};` placeholder from Task 1)
-- Modify: `index.html` (add the stylesheet link)
+- `index.html` needs no change (Task 1 already points it at `src/main.ts`)
 
 **Interfaces:**
 - Consumes: everything produced by Tasks 1–13.
@@ -3028,12 +3034,10 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 .banner.warn { background: rgba(210,153,34,.12); color: #f0c674; }
 ```
 
-- [ ] **Step 4: Add the stylesheet to `index.html`**
+- [ ] **Step 4: (no change needed to `index.html`)**
 
-Insert inside `<head>`, after the `<title>` line:
-```html
-    <link rel="stylesheet" href="/src/ui/styles.css" />
-```
+`src/main.ts` imports `./ui/styles.css` directly, which is how Vite expects CSS
+to be pulled in. Do not also add a `<link>` tag — that would load it twice.
 
 - [ ] **Step 5: Implement `src/ui/app.ts`**
 
@@ -3219,6 +3223,10 @@ function refreshSessions(): void {
 
 async function start(w: WalletConnection): Promise<WalletKit> {
   const instance = await createWalletKit(import.meta.env.VITE_REOWN_PROJECT_ID);
+  // Assign before registering handlers: refreshSessions() and the provider
+  // event handlers below all read the module-level `kit`, and they can fire
+  // before this function returns.
+  kit = instance;
   const dapp = createDappPort(instance);
 
   instance.on('session_proposal', async (proposal) => {
