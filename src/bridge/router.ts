@@ -12,6 +12,16 @@ import { buildCard } from './decode';
 
 export const WALLET_TIMEOUT_MS = 3 * 60 * 1000;
 
+/**
+ * Compile-time exhaustiveness check for the dispatch switch below. If a fifth
+ * `Disposition` kind is ever added and not handled explicitly, this call site
+ * fails to typecheck instead of silently falling through to "forward to the
+ * wallet" — the exact failure mode the allowlist policy forbids.
+ */
+function assertNever(x: never): never {
+  throw new Error(`Unhandled disposition: ${JSON.stringify(x)}`);
+}
+
 export interface RouterDeps {
   wallet: WalletPort;
   dapp: DappPort;
@@ -49,21 +59,27 @@ export async function handleRequest(
   try {
     const disposition = classify(req.method);
 
-    if (disposition.kind === 'reject') {
-      await respondError({ code: disposition.code, message: disposition.message });
-      return;
-    }
-
-    if (disposition.kind === 'confirm' || disposition.kind === 'unknown') {
-      const card = buildCard(req, {
-        chainId: req.chainId,
-        isSmartAccount: deps.isSmartAccount(),
-      });
-      const approved = await confirm.confirm(req, card);
-      if (!approved) {
-        await respondError(USER_REJECTED);
+    switch (disposition.kind) {
+      case 'reject':
+        await respondError({ code: disposition.code, message: disposition.message });
         return;
+      case 'confirm':
+      case 'unknown': {
+        const card = buildCard(req, {
+          chainId: req.chainId,
+          isSmartAccount: deps.isSmartAccount(),
+        });
+        const approved = await confirm.confirm(req, card);
+        if (!approved) {
+          await respondError(USER_REJECTED);
+          return;
+        }
+        break;
       }
+      case 'pass':
+        break;
+      default:
+        assertNever(disposition);
     }
 
     const currentChain = await wallet.getChainId();

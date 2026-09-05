@@ -13,10 +13,10 @@ export interface JsonRpcErrorPayload {
  * from "something broke" (show an error state). Sending 5000 leaves dapps
  * stuck in a permanent failure state.
  */
-export const USER_REJECTED: JsonRpcErrorPayload = {
+export const USER_REJECTED: JsonRpcErrorPayload = Object.freeze({
   code: 4001,
   message: 'User rejected the request.',
-};
+});
 
 /** How the bridge should treat an incoming method. */
 export type Disposition =

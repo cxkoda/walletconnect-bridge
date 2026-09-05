@@ -58,6 +58,14 @@ function makeDeps(over: Partial<{
 
 const totalResponses = (h: ReturnType<typeof makeDeps>) => h.results.length + h.errors.length;
 
+/** utf8 text -> `0x`-prefixed hex, without pulling in Node's Buffer typings. */
+function utf8ToHex(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let hex = '0x';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
 describe('handleRequest', () => {
   it('forwards a PASS method without prompting', async () => {
     const h = makeDeps();
@@ -165,16 +173,103 @@ describe('handleRequest', () => {
     expect(totalResponses(h)).toBe(0);
   });
 
-  it('responds exactly once even when the dapp port itself is slow', async () => {
+  it('responds exactly once even when the dapp port resolves respondResult slowly', async () => {
     const h = makeDeps();
-    await handleRequest(req('eth_chainId'), h.deps);
+    let releaseRespond: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseRespond = resolve;
+    });
+    (h.deps.dapp.respondResult as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (_t: string, _i: number, r: unknown) => {
+        await gate;
+        h.results.push(r);
+      },
+    );
+
+    const pending = handleRequest(req('eth_chainId'), h.deps);
+    // Flush microtasks (chain-id check, withTimeout wrapping, ...) until the
+    // dapp port has actually been reached, without hard-coding a tick count.
+    const respondResultMock = h.deps.dapp.respondResult as ReturnType<typeof vi.fn>;
+    for (let i = 0; i < 50 && respondResultMock.mock.calls.length === 0; i++) {
+      await Promise.resolve();
+    }
+    // While the dapp port's call is still pending, nothing else must be queued.
+    expect(respondResultMock).toHaveBeenCalledTimes(1);
+    expect(h.deps.dapp.respondError).not.toHaveBeenCalled();
+
+    releaseRespond();
+    await pending;
     expect(totalResponses(h)).toBe(1);
+    expect(h.deps.dapp.respondResult).toHaveBeenCalledTimes(1);
+    expect(h.deps.dapp.respondError).not.toHaveBeenCalled();
   });
 
-  it('forwards the original method and params unchanged', async () => {
+  it('does not fall back to respondError when respondResult has already claimed the latch and then rejects', async () => {
+    const h = makeDeps();
+    (h.deps.dapp.respondResult as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('dapp port went away'),
+    );
+
+    await handleRequest(req('eth_chainId'), h.deps);
+
+    // The `responded` latch is set before dapp.respondResult is awaited, so its
+    // rejection must NOT trigger the catch block's respondError fallback — a
+    // regression that moved the latch-set to after the await would fail this.
+    expect(h.deps.dapp.respondResult).toHaveBeenCalledTimes(1);
+    expect(h.deps.dapp.respondError).not.toHaveBeenCalled();
+  });
+
+  it('passes the original request and a matching card to confirm', async () => {
+    const h = makeDeps();
+    const r = req('personal_sign', ['0x68656c6c6f', '0xabc']);
+    await handleRequest(r, h.deps);
+    const confirmMock = h.deps.confirm.confirm as ReturnType<typeof vi.fn>;
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    const [passedReq, passedCard] = confirmMock.mock.calls[0] as [unknown, { method: string }];
+    expect(passedReq).toBe(r);
+    expect(passedCard).toMatchObject({ method: 'personal_sign' });
+  });
+
+  it('reaches deps.isSmartAccount() through to the confirmation card', async () => {
+    // A SIWE personal_sign message: decodePersonalSign adds an ERC-1271 warning
+    // only when ctx.isSmartAccount is true, so the card content itself proves
+    // whether the accessor's return value reached buildCard, not just that it
+    // was called.
+    const siwe =
+      'example.com wants you to sign in with your Ethereum account:\n' +
+      '0x0000000000000000000000000000000000000001\n\n' +
+      'URI: https://example.com\n' +
+      'Version: 1\n' +
+      'Chain ID: 8453\n' +
+      'Nonce: abcdef123456';
+    const hex = utf8ToHex(siwe);
+
+    const smart = makeDeps();
+    await handleRequest(req('personal_sign', [hex, '0xabc'], 8453), smart.deps);
+    const smartConfirmMock = smart.deps.confirm.confirm as ReturnType<typeof vi.fn>;
+    const smartCard = smartConfirmMock.mock.calls[0][1] as {
+      warnings: { text: string }[];
+    };
+
+    const eoa = makeDeps();
+    eoa.deps.isSmartAccount = () => false;
+    await handleRequest(req('personal_sign', [hex, '0xabc'], 8453), eoa.deps);
+    const eoaConfirmMock = eoa.deps.confirm.confirm as ReturnType<typeof vi.fn>;
+    const eoaCard = eoaConfirmMock.mock.calls[0][1] as {
+      warnings: { text: string }[];
+    };
+
+    expect(smartCard.warnings.some((w) => /ERC-1271/.test(w.text))).toBe(true);
+    expect(eoaCard.warnings.some((w) => /ERC-1271/.test(w.text))).toBe(false);
+  });
+
+  it('forwards the original method and params unchanged, without rewrapping or mutating them', async () => {
     const h = makeDeps();
     const params = [{ to: '0xabc', value: '0x1' }];
+    const snapshot = structuredClone(params);
     await handleRequest(req('eth_sendTransaction', params), h.deps);
-    expect(h.requested).toEqual([{ method: 'eth_sendTransaction', params }]);
+    expect(h.requested).toEqual([{ method: 'eth_sendTransaction', params: snapshot }]);
+    // Same object, not a re-wrapped copy — and per the deep-equal above, untouched.
+    expect(h.requested[0].params).toBe(params);
   });
 });
