@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classify, ADVERTISED_METHODS } from './policy';
+import { classify, ADVERTISED_METHODS, isChainIndependent } from './policy';
 
 describe('classify', () => {
   it.each([
@@ -78,6 +78,46 @@ describe('classify', () => {
       // Object.prototype members, returning a truthy function as `message`.
       // These must classify as unknown, not a malformed reject.
       expect(classify(m)).toEqual({ kind: 'unknown' });
+    },
+  );
+});
+
+describe('isChainIndependent', () => {
+  it.each([
+    'eth_accounts',
+    'eth_chainId',
+    'wallet_getCapabilities',
+    'wallet_switchEthereumChain',
+    'wallet_addEthereumChain',
+    'wallet_watchAsset',
+  ])('%s does not need the wallet on any particular chain', (m) => {
+    expect(isChainIndependent(m)).toBe(true);
+  });
+
+  it.each([
+    'eth_call',
+    'eth_estimateGas',
+    'eth_getBalance',
+    'eth_getTransactionReceipt',
+    'eth_blockNumber',
+    'eth_sendTransaction',
+    'eth_sendRawTransaction',
+    'wallet_sendCalls',
+  ])('%s reads or writes chain state and must keep the sync', (m) => {
+    expect(isChainIndependent(m)).toBe(false);
+  });
+
+  it('denies by default for an unrecognised method', () => {
+    // Being on the wrong chain is a correctness bug; an extra prompt is only
+    // an annoyance, so an unknown method keeps the sync.
+    expect(isChainIndependent('eth_someFutureThing')).toBe(false);
+    expect(isChainIndependent('')).toBe(false);
+  });
+
+  it.each(['toString', 'constructor', '__proto__'])(
+    'does not resolve Object.prototype members: %s',
+    (m) => {
+      expect(isChainIndependent(m)).toBe(false);
     },
   );
 });

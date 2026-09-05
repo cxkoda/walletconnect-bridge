@@ -57,8 +57,40 @@ export const ADVERTISED_METHODS = [
   'eth_chainId',
 ] as const;
 
+/**
+ * Methods whose answer does not depend on which chain the wallet is currently
+ * on, so the router must not sync the chain before forwarding them.
+ *
+ * The sync exists for `eth_call` / `eth_estimateGas` / `eth_getBalance`, which
+ * genuinely read chain state and would answer from the wrong chain without it.
+ * Applying it to everything meant a bare `eth_chainId` or `eth_accounts` could
+ * pop a real network-switch prompt in the Base app for a question that never
+ * needed one — and `wallet_switchEthereumChain` cost *two* prompts for one
+ * switch: one to sync to the session chain, then the dapp's own.
+ */
+export const CHAIN_INDEPENDENT_METHODS = [
+  'eth_accounts',
+  'eth_chainId',
+  'wallet_getCapabilities',
+  'wallet_switchEthereumChain',
+  'wallet_addEthereumChain',
+  'wallet_watchAsset',
+] as const;
+
 const passSet: ReadonlySet<string> = new Set(PASS_METHODS);
 const confirmSet: ReadonlySet<string> = new Set(CONFIRM_METHODS);
+const chainIndependentSet: ReadonlySet<string> = new Set(CHAIN_INDEPENDENT_METHODS);
+
+/**
+ * Whether the router may skip the chain sync for this method.
+ *
+ * Deny-by-default on purpose: an unrecognised method is assumed to need the
+ * right chain. Being on the wrong chain is a correctness bug; an extra prompt
+ * is only an annoyance.
+ */
+export function isChainIndependent(method: string): boolean {
+  return chainIndependentSet.has(method);
+}
 
 /**
  * Allowlist, not blocklist. An unrecognised method returns `unknown`, which the

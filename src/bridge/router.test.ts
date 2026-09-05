@@ -4,12 +4,18 @@ import { RequestExpiredError } from './types';
 import type { IncomingRequest, JsonRpcErrorPayload } from './types';
 import type { RouterDeps } from './router';
 
-const req = (method: string, params: unknown = [], chainId = 8453): IncomingRequest => ({
+const req = (
+  method: string,
+  params: unknown = [],
+  chainId = 8453,
+  expiryTimestamp?: number,
+): IncomingRequest => ({
   id: 7,
   topic: 'topic-1',
   chainId,
   method,
   params,
+  expiryTimestamp,
   dapp: { name: 'Test Dapp', url: 'https://t.example', validation: 'VALID', isScam: false },
 });
 
@@ -17,6 +23,8 @@ function makeDeps(over: Partial<{
   request: (a: { method: string; params?: unknown }) => Promise<unknown>;
   chainId: number;
   confirm: (...a: unknown[]) => Promise<boolean>;
+  now: () => number;
+  timeoutMs: number;
 }> = {}) {
   const results: unknown[] = [];
   const errors: JsonRpcErrorPayload[] = [];
@@ -50,7 +58,9 @@ function makeDeps(over: Partial<{
       confirm: vi.fn(async () => (over.confirm ? over.confirm() : true)),
     },
     isSmartAccount: () => true,
-    timeoutMs: 50,
+    timeoutMs: over.timeoutMs ?? 50,
+    now: over.now,
+    logError: vi.fn(),
   } as unknown as RouterDeps;
 
   return { deps, results, errors, switched, requested, order };
@@ -271,5 +281,178 @@ describe('handleRequest', () => {
     expect(h.requested).toEqual([{ method: 'eth_sendTransaction', params: snapshot }]);
     // Same object, not a re-wrapped copy — and per the deep-equal above, untouched.
     expect(h.requested[0].params).toBe(params);
+  });
+
+  it('logs the original error before flattening it to a JSON-RPC payload', () => {
+    // toJsonRpcError discards the error and its stack, so without this the
+    // highest-risk module in the app reports its failures as a bare 5000 and
+    // nothing else — undiagnosable.
+    const h = makeDeps({
+      request: async () => {
+        throw new Error('kaboom');
+      },
+    });
+    return handleRequest(req('personal_sign'), h.deps).then(() => {
+      const logError = h.deps.logError as ReturnType<typeof vi.fn>;
+      expect(logError).toHaveBeenCalledTimes(1);
+      const [message, err] = logError.mock.calls[0] as [string, unknown];
+      expect(message).toContain('personal_sign');
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('kaboom');
+    });
+  });
+
+  /**
+   * `expiryTimestamp` (in SECONDS) was populated off the wire and read
+   * nowhere. `session_request_expire` only reached the pending queue, whose
+   * slot is already gone the moment the user approves — so a request that
+   * expired while the Base app was open still got signed and broadcast, and
+   * only then did `respondResult` throw for the dead id. The user paid gas for
+   * a request the dapp had abandoned.
+   */
+  describe('request expiry (expiryTimestamp)', () => {
+    const NOW = 1_800_000_000_000;
+    const at = (msFromNow: number) => Math.floor((NOW + msFromNow) / 1000);
+    const clock = () => NOW;
+
+    it('never reaches the wallet when the TTL lapsed while the user was deciding', async () => {
+      const h = makeDeps({ now: clock });
+      await handleRequest(
+        req('eth_sendTransaction', [{ to: '0xa' }], 8453, at(-1000)),
+        h.deps,
+      );
+      expect(h.deps.wallet.getChainId).not.toHaveBeenCalled();
+      expect(h.deps.wallet.request).not.toHaveBeenCalled();
+      expect(totalResponses(h)).toBe(0);
+    });
+
+    it('sends no response for a lapsed TTL, exactly like session_request_expire', async () => {
+      const h = makeDeps({ now: clock });
+      await handleRequest(req('personal_sign', [], 8453, at(-1)), h.deps);
+      expect(h.deps.dapp.respondResult).not.toHaveBeenCalled();
+      expect(h.deps.dapp.respondError).not.toHaveBeenCalled();
+    });
+
+    it('drops a response whose TTL lapsed during the wallet round-trip', async () => {
+      // The dangerous ordering: the wallet DOES sign, but the dapp is gone.
+      // Nothing may be sent for that id — responding to it throws inside
+      // WalletKit — but the user must not be billed for it silently either.
+      let currentTime = NOW;
+      const h = makeDeps({
+        now: () => currentTime,
+        request: async () => {
+          currentTime = NOW + 10_000;
+          return '0xsignature';
+        },
+      });
+      await handleRequest(req('personal_sign', [], 8453, at(5_000)), h.deps);
+      expect(h.deps.wallet.request).toHaveBeenCalledOnce();
+      expect(totalResponses(h)).toBe(0);
+    });
+
+    it('proceeds normally while the TTL still has time left', async () => {
+      const h = makeDeps({ now: clock });
+      await handleRequest(
+        req('eth_sendTransaction', [{ to: '0xa' }], 8453, at(60_000)),
+        h.deps,
+      );
+      expect(h.results).toEqual(['ok']);
+    });
+
+    it('treats expiryTimestamp as SECONDS, not milliseconds', () => {
+      // Read as milliseconds, a timestamp 60s in the future looks like 1970 —
+      // every request would be born expired and the bridge would answer none.
+      const h = makeDeps({ now: clock });
+      return handleRequest(req('personal_sign', [], 8453, at(60_000)), h.deps).then(() => {
+        expect(h.results).toEqual(['ok']);
+      });
+    });
+
+    it('clamps the wallet timeout down to the remaining TTL', async () => {
+      // The wallet timeout is 3 minutes by default and the TTL is typically 5,
+      // but a TTL with 40ms left must not license a 3-minute wait: the answer
+      // would arrive for a request nobody can be told about. expiryTimestamp
+      // has one-second resolution, so this picks a clock offset that leaves
+      // exactly 40ms rather than going through `at()`.
+      const h = makeDeps({
+        now: () => 1_800_000_000_960,
+        timeoutMs: 60_000,
+        request: () => new Promise(() => {}),
+      });
+      const started = Date.now();
+      await handleRequest(req('personal_sign', [], 8453, 1_800_000_001), h.deps);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(5_000);
+      // The clamped timeout fired before the TTL, so the id is still live and
+      // the dapp gets its timeout error.
+      expect(h.errors[0]?.code).toBe(5000);
+      expect(h.errors[0]?.message).toMatch(/wallet/i);
+    });
+
+    it('sends nothing when a failure surfaces after the TTL has lapsed', async () => {
+      let currentTime = NOW;
+      const h = makeDeps({
+        now: () => currentTime,
+        request: async () => {
+          currentTime = NOW + 10_000;
+          throw new Error('wallet blew up');
+        },
+      });
+      await handleRequest(req('personal_sign', [], 8453, at(5_000)), h.deps);
+      expect(totalResponses(h)).toBe(0);
+    });
+
+    it('is unaffected when the request carries no expiry at all', async () => {
+      const h = makeDeps({ now: clock });
+      await handleRequest(req('personal_sign'), h.deps);
+      expect(h.results).toEqual(['ok']);
+    });
+  });
+
+  /**
+   * The chain sync exists for eth_call / eth_estimateGas / eth_getBalance and
+   * must stay. Running it for chain-independent methods meant a bare
+   * eth_chainId could pop a real network-switch prompt in the Base app, and
+   * wallet_switchEthereumChain cost two prompts for one switch.
+   */
+  describe('chain sync', () => {
+    it.each([
+      'eth_accounts',
+      'eth_chainId',
+      'wallet_switchEthereumChain',
+      'wallet_getCapabilities',
+    ])('does not touch the chain for %s', async (method) => {
+      const h = makeDeps({ chainId: 1 });
+      await handleRequest(req(method, [], 8453), h.deps);
+      expect(h.deps.wallet.getChainId).not.toHaveBeenCalled();
+      expect(h.deps.wallet.switchChain).not.toHaveBeenCalled();
+      expect(h.results).toEqual(['ok']);
+    });
+
+    it('costs wallet_switchEthereumChain exactly one prompt, not two', async () => {
+      const h = makeDeps({ chainId: 1 });
+      await handleRequest(
+        req('wallet_switchEthereumChain', [{ chainId: '0x2105' }], 8453),
+        h.deps,
+      );
+      expect(h.switched).toEqual([]);
+      expect(h.order).toEqual(['request']);
+    });
+
+    it.each(['eth_call', 'eth_estimateGas', 'eth_getBalance'])(
+      'still syncs the chain for %s, which reads chain state',
+      async (method) => {
+        const h = makeDeps({ chainId: 1 });
+        await handleRequest(req(method, [], 8453), h.deps);
+        expect(h.switched).toEqual([8453]);
+        expect(h.order).toEqual(['switch', 'request']);
+      },
+    );
+
+    it('still syncs the chain for an unknown method (deny by default)', async () => {
+      const h = makeDeps({ chainId: 1 });
+      await handleRequest(req('eth_futureThing', [], 8453), h.deps);
+      expect(h.switched).toEqual([8453]);
+    });
   });
 });
